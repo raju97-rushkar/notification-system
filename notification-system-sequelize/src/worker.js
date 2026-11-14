@@ -11,12 +11,15 @@ async function start() {
   await connectDB();
   const job = startReminderJob();
 
-  process.on('SIGINT', async () => {
+  // Ctrl+C (SIGINT) or Docker/PM2 stop (SIGTERM)
+  const shutdown = async () => {
     console.log('Stopping worker...');
     await job.stop();
     await disconnectDB();
     process.exit(0);
-  });
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 start().catch((error) => {

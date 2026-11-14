@@ -114,11 +114,15 @@ async function handleFailure(reminder, workerId, error) {
     : { status: STATUS.FAILED };
 
   // Status change + failure log are saved together (one transaction)
-  await sequelize.transaction(async (transaction) => {
-    await Reminder.update(
+  const logged = await sequelize.transaction(async (transaction) => {
+    const [updatedCount] = await Reminder.update(
       { ...changes, lastError: error.message, lockedBy: null, lockedUntil: null },
       { where: { id: reminder.id, status: STATUS.PROCESSING, lockedBy: workerId }, transaction }
     );
+
+    // Our lock expired and another worker took over: this attempt no longer
+    // owns the reminder, so don't write a failure log for it.
+    if (updatedCount === 0) return false;
 
     await FailedAttempt.create(
       {
@@ -130,26 +134,61 @@ async function handleFailure(reminder, workerId, error) {
       },
       { transaction }
     );
+    return true;
   });
 
-  console.log(`Reminder ${reminder.id} failed (attempt ${reminder.attempts}): ${error.message}`);
+  if (logged) {
+    console.log(`Reminder ${reminder.id} failed (attempt ${reminder.attempts}): ${error.message}`);
+  } else {
+    console.log(`Reminder ${reminder.id}: lock lost, another worker owns it now (${error.message})`);
+  }
 }
+
+const CRASH_ERROR = 'Worker stopped before finishing';
 
 // Crash recovery: if a worker crashed or the server restarted while a reminder
 // was "processing", the reminder would be stuck forever. When the lock time
 // is over, we put it back to "pending" so any worker can pick it up again.
+//
+// A crash counts as a failed attempt: it is logged, and once maxAttempts is
+// used up the reminder becomes "failed". Without that, a reminder that crashes
+// the worker every time would be retried forever.
+//
+// SKIP LOCKED again: two workers starting at the same time never handle (and
+// log) the same stuck reminder twice.
 async function releaseStuckReminders() {
-  const [releasedCount] = await Reminder.update(
-    {
-      status: STATUS.PENDING,
-      nextRunAt: new Date(),
-      lastError: 'Worker stopped before finishing',
-      lockedBy: null,
-      lockedUntil: null,
-    },
-    { where: { status: STATUS.PROCESSING, lockedUntil: { [Op.lte]: new Date() } } }
-  );
-  return releasedCount;
+  return sequelize.transaction(async (transaction) => {
+    const now = new Date();
+    const stuck = await Reminder.findAll({
+      where: { status: STATUS.PROCESSING, lockedUntil: { [Op.lte]: now } },
+      limit: BATCH_SIZE,
+      lock: transaction.LOCK.UPDATE,
+      skipLocked: true,
+      transaction,
+    });
+
+    for (const reminder of stuck) {
+      const willRetry = reminder.attempts < reminder.maxAttempts;
+      const deadWorker = reminder.lockedBy;
+
+      await reminder.update(
+        {
+          ...(willRetry ? { status: STATUS.PENDING, nextRunAt: now } : { status: STATUS.FAILED }),
+          lastError: CRASH_ERROR,
+          lockedBy: null,
+          lockedUntil: null,
+        },
+        { transaction }
+      );
+
+      await FailedAttempt.create(
+        { reminderId: reminder.id, attempt: reminder.attempts, error: CRASH_ERROR, workerId: deadWorker, willRetry },
+        { transaction }
+      );
+    }
+
+    return stuck.length;
+  });
 }
 
 // PostgreSQL has no automatic "delete after X days" (like MongoDB's TTL index),

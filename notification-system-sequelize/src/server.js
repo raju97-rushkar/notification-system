@@ -30,13 +30,17 @@ async function start() {
     job = startReminderJob();
   }
 
-  // 4. Ctrl+C: stop the worker and close the DB connections cleanly
-  process.on('SIGINT', async () => {
+  // 4. Ctrl+C (SIGINT) or Docker/PM2 stop (SIGTERM): stop the worker and close
+  //    the DB connections cleanly. A reminder that was mid-processing is picked
+  //    up again by crash recovery once its lock expires.
+  const shutdown = async () => {
     console.log('Shutting down...');
     if (job) await job.stop();
     await disconnectDB();
     process.exit(0);
-  });
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 start().catch((error) => {
