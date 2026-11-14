@@ -89,6 +89,19 @@ Defined in each model's `indexes` option. The `fields` are database column names
 
 **How the column order was chosen:** columns compared with `=` come first (`user_id`, `status`). The sort or range column comes last (`due_at`, `next_run_at`).
 
+**Checked with `EXPLAIN ANALYZE`** on 50,000 reminders (500 users, 90% completed) and about 45,000 notifications:
+
+| Query | Plan | Time |
+|---|---|---|
+| Worker: claim a due reminder (`FOR UPDATE SKIP LOCKED`) | Index Scan `idx_reminders_status_next_run` | 0.05 ms |
+| Worker: find stuck reminders | Index Scan `idx_reminders_status_locked_until` | 0.03 ms |
+| API: my reminders, newest first | Index Scan `idx_reminders_user_created` | 0.06 ms |
+| API: my reminders by status, sorted by due date | Bitmap Index Scan `idx_reminders_user_status_due` | 0.03 ms |
+| API: count for pagination | Bitmap Index Scan `idx_reminders_user_created` | 0.15 ms |
+| API: my (unread) notifications | Index Scan `idx_notifications_user_created` | 0.04–0.08 ms |
+
+Every query uses an index, and none needs a full table scan. Old completed reminders don't slow the worker down, because `status` is the first column of its indexes. That's why the indexes were left as they are.
+
 ## 7. Query decisions
 
 - **Filters** use Sequelize operators: `Op.gte`, `Op.lte`, `Op.iLike` (case-insensitive LIKE), `Op.ne`. Search text is LIKE-escaped, so `%` and `_` are not wildcards.

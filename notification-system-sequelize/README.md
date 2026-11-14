@@ -40,6 +40,7 @@ You don't need to create anything by hand. On startup the app:
 | `npm start` | API + worker (normal start) |
 | `npm run worker` | Only the worker (to run more than one worker) |
 | `npm test` | All tests, on a separate database `notification_system_sequelize_test` |
+| `npm run test:coverage` | Tests + coverage report (in `coverage/`) |
 
 ## 3. Settings (.env)
 
@@ -73,7 +74,7 @@ src/
   jobs/reminder.job.js  background worker (node-cron + transactions)
   utils/                small helpers
   app.js / server.js / worker.js
-tests/                  API tests + worker tests
+tests/                  unit tests, API tests, worker tests, multi-process test
 ```
 
 **Suggested reading order for code review:**
@@ -95,12 +96,21 @@ tests/                  API tests + worker tests
 
 ## 6. Tests
 
-`npm test` runs **42 tests**:
-- API: create / update / cancel, validation, timezones, SQL injection safety, pagination, filter, sort, search, user isolation
-- **5 workers at the same time → no duplicates**
-- **transactions:** a failure after the notification insert rolls the insert back
-- **SKIP LOCKED:** a row locked by another transaction is skipped
-- **relationships:** `include: 'notification'` and `include: 'failedAttempts'`
-- retries, max attempts → `failed`, manual retry, crash recovery, overdue reminders, node-cron job
+`npm test` runs **101 tests** (about 8 seconds). `npm run test:coverage` shows coverage: about 98% of lines.
+
+| File | Type | What it checks |
+|---|---|---|
+| [tests/unit.test.js](tests/unit.test.js) | unit (no DB) | zod validators, timezone check, `checkUser`, `validate`, `errorHandler` |
+| [tests/reminders.api.test.js](tests/reminders.api.test.js) | integration | create / get / update / cancel, validation, 404 / 409 rules, pagination, filter, sort, search, user isolation, SQL injection, **timezones + daylight saving** |
+| [tests/notifications.api.test.js](tests/notifications.api.test.js) | integration | list, read / unread filter, mark as read, user isolation |
+| [tests/worker.test.js](tests/worker.test.js) | integration | see below |
+| [tests/multiprocess.test.js](tests/multiprocess.test.js) | integration | **4 separate worker processes, 200 reminders → exactly 200 notifications** |
+
+What `worker.test.js` covers:
+- **duplicates:** 5 workers at once, the same notification inserted 10 times at once, a slow worker that lost its lock, cancel requests racing with 3 workers
+- **transactions:** a failure after the notification insert rolls the insert back. **SKIP LOCKED:** a locked row is skipped, not waited for
+- **retries:** backoff of 30s then 60s, the failure log (attempt, error, worker id), `maxAttempts` → `failed`, manual retry (only for `failed`)
+- **crash / restart:** a stuck reminder is picked up again, a crash after the insert still gives 1 notification, a valid lock is respected, a crash is logged as an attempt, **a reminder that crashes the worker every time stops after `maxAttempts`**, two workers release a stuck reminder only once
+- overdue reminders, rescheduling, timezones (only the UTC moment matters), the node-cron job
 
 If your PostgreSQL password or port is different, change it in [tests/env.js](tests/env.js).

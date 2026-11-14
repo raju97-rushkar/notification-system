@@ -47,6 +47,16 @@ Reminder response:
 }
 ```
 
+`GET /reminders/:id/attempts` response (newest first). A worker crash also shows up here:
+```json
+[
+  { "id": "...", "reminderId": "3f2b8c1e-...", "attempt": 2, "error": "Worker stopped before finishing",
+    "workerId": "server-a-4120", "willRetry": true, "createdAt": "..." },
+  { "id": "...", "reminderId": "3f2b8c1e-...", "attempt": 1, "error": "SMTP timeout",
+    "workerId": "server-b-8812", "willRetry": true, "createdAt": "..." }
+]
+```
+
 ## Notifications
 
 | Method | URL | Query | Notes |

@@ -66,6 +66,16 @@ sequelize.transaction(async (transaction) => {
 
 The reminder's status change (back to `pending` with a later `nextRunAt`, or `failed`) and the new `failed_attempts` row are saved in one transaction. The log and the status always match.
 
+If our lock was already taken over by another worker, the update matches no row. In that case **no** failure log is written, because this attempt no longer owns the reminder.
+
+### Crash recovery
+
+At the start of every run, `releaseStuckReminders()` looks for reminders that are `processing` but whose `lockedUntil` has passed (the worker died or the server restarted). In one transaction (`FOR UPDATE SKIP LOCKED`, so two workers never handle the same one) each of them:
+- goes back to `pending` (or to `failed` if `attempts` has reached `maxAttempts`)
+- gets a `failed_attempts` row with `error: "Worker stopped before finishing"` and the dead worker's id
+
+So a crash counts as an attempt. A reminder that crashes the worker every time ends as `failed` after `maxAttempts`, instead of looping forever.
+
 ## Duplicate prevention: three layers
 
 1. **SKIP LOCKED claim:** two workers never claim the same reminder.
@@ -82,9 +92,11 @@ The reminder's status change (back to `pending` with a later `nextRunAt`, or `fa
 
 | Situation | What happens |
 |---|---|
-| **Server restart / crash while processing** | The reminder stays `processing` with an expired `lockedUntil`. The next run of any worker sets it back to `pending` and processes it. Thanks to transaction 2, a crash in the middle leaves no half-done work. |
+| **Server restart / crash while processing** | The reminder stays `processing` with an expired `lockedUntil`. The next run of any worker sets it back to `pending` (logged as a failed attempt) and processes it. Thanks to transaction 2, a crash in the middle leaves no half-done work. |
+| **A reminder that crashes the worker every time** | Each crash counts as an attempt. After `maxAttempts` it becomes `failed`. |
+| **Shutdown (Ctrl+C, Docker/PM2 stop)** | `SIGINT` and `SIGTERM` stop the cron job and close the DB pool. Anything mid-processing is recovered as above. |
 | **Overdue reminders** | Processed on the next run, oldest first. `delayMs` shows how late they were. |
-| **Many workers / many servers** | SKIP LOCKED + `lockedBy` + unique. Tested with 5 parallel workers on 40 reminders: exactly 40 notifications. |
+| **Many workers / many servers** | SKIP LOCKED + `lockedBy` + unique. Tested with 5 parallel workers in one process (40 reminders), and with **4 separate worker processes** (200 reminders): exactly one notification each. |
 | **User edits or cancels while the worker has it** | Update and cancel only match `status: 'pending'` (one SQL statement), otherwise `409`. |
 | **Retry creates a duplicate?** | No. Layers 2 and 3. |
 | **Database down** | The worker logs the error and tries again on the next cron run. |
@@ -93,7 +105,6 @@ The reminder's status change (back to `pending` with a later `nextRunAt`, or `fa
 
 ## Known limitations
 
-- A crash-recovered reminder gets one extra attempt, so it can go one over `maxAttempts`. This keeps the recovery code simple.
 - Up to ~5 seconds of delay because of the cron interval. It's configurable.
 - `sync()` doesn't alter existing tables. Use migrations in production.
 - Worker times use the Node.js clock (`new Date()`). With several servers, keep their clocks in sync (NTP). The raw-SQL version uses PostgreSQL's `now()` instead.
