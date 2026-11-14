@@ -37,6 +37,46 @@ describe('Create reminder', () => {
     expect(res.body.dueAtLocal).toBe('1/15/2099, 10:00:00 AM');
   });
 
+  it('handles daylight saving time (New York summer = UTC-4, winter = UTC-5)', async () => {
+    const summer = await post('/api/reminders', {
+      title: 'Summer',
+      dueAt: '2099-07-01T09:00:00-04:00',
+      timezone: 'America/New_York',
+    });
+    const winter = await post('/api/reminders', {
+      title: 'Winter',
+      dueAt: '2099-01-01T09:00:00-05:00',
+      timezone: 'America/New_York',
+    });
+
+    expect(summer.body.dueAt).toBe('2099-07-01T13:00:00.000Z');
+    expect(summer.body.dueAtLocal).toBe('7/1/2099, 9:00:00 AM');
+    expect(winter.body.dueAt).toBe('2099-01-01T14:00:00.000Z');
+    expect(winter.body.dueAtLocal).toBe('1/1/2099, 9:00:00 AM');
+  });
+
+  it('the same moment written with different offsets is stored identically', async () => {
+    const india = await post('/api/reminders', { title: 'A', dueAt: '2099-03-10T15:30:00+05:30' });
+    const utc = await post('/api/reminders', { title: 'B', dueAt: '2099-03-10T10:00:00Z' });
+    const tokyo = await post('/api/reminders', { title: 'C', dueAt: '2099-03-10T19:00:00+09:00' });
+
+    expect(new Set([india.body.dueAt, utc.body.dueAt, tokyo.body.dueAt]).size).toBe(1);
+  });
+
+  it('defaults timezone to UTC', async () => {
+    const res = await post('/api/reminders', { title: 'x', dueAt: '2099-01-15T10:00:00Z' });
+    expect(res.body.timezone).toBe('UTC');
+    expect(res.body.dueAtLocal).toBe('1/15/2099, 10:00:00 AM');
+  });
+
+  it('changing only the timezone changes the local time, not the moment', async () => {
+    const created = await post('/api/reminders', { title: 'x', dueAt: '2099-01-15T10:00:00Z' });
+    const res = await patch(`/api/reminders/${created.body.id}`, { timezone: 'Asia/Kolkata' });
+
+    expect(res.body.dueAt).toBe('2099-01-15T10:00:00.000Z');
+    expect(res.body.dueAtLocal).toBe('1/15/2099, 3:30:00 PM');
+  });
+
   it('rejects a date without timezone', async () => {
     const res = await post('/api/reminders', { title: 'x', dueAt: '2099-01-15T10:00:00' });
     expect(res.status).toBe(400);
@@ -157,6 +197,20 @@ describe('Get, update, cancel', () => {
 
   it('rejects an empty update', async () => {
     expect((await patch(`/api/reminders/${id}`, {})).status).toBe(400);
+  });
+
+  it('rejects moving dueAt into the past', async () => {
+    expect((await patch(`/api/reminders/${id}`, { dueAt: minutesFromNow(-60) })).status).toBe(400);
+  });
+
+  it('cannot update or cancel another user\'s reminder (404)', async () => {
+    expect((await patch(`/api/reminders/${id}`, { title: 'x' }, 'user2')).status).toBe(404);
+    expect((await post(`/api/reminders/${id}/cancel`, undefined, 'user2')).status).toBe(404);
+  });
+
+  it('cannot update a cancelled reminder (409)', async () => {
+    await post(`/api/reminders/${id}/cancel`);
+    expect((await patch(`/api/reminders/${id}`, { title: 'x' })).status).toBe(409);
   });
 
   it('cancels a pending reminder, second cancel gives 409', async () => {

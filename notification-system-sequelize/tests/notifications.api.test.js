@@ -51,4 +51,19 @@ describe('Notifications API', () => {
     const res = await request(app).patch(`/api/notifications/${id}/read`).set('x-user-id', 'user2');
     expect(res.status).toBe(404);
   });
+
+  it('gives 400 for an invalid id and 401 without x-user-id', async () => {
+    expect((await request(app).patch('/api/notifications/abc/read').set('x-user-id', 'user1')).status).toBe(400);
+    expect((await request(app).get('/api/notifications')).status).toBe(401);
+  });
+
+  it('filters read notifications (unread=false)', async () => {
+    await createNotifications('user1', 3);
+    const { id } = await Notification.findOne();
+    await request(app).patch(`/api/notifications/${id}/read`).set('x-user-id', 'user1');
+
+    const read = await request(app).get('/api/notifications?unread=false').set('x-user-id', 'user1');
+    expect(read.body.pagination.total).toBe(1);
+    expect(read.body.data[0].id).toBe(id);
+  });
 });

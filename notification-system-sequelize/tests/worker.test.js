@@ -125,6 +125,75 @@ describe('Duplicate prevention (multiple workers)', () => {
     await reminder.reload();
     expect(reminder.status).toBe('completed');
     expect(await Notification.count()).toBe(1);
+    // The only log is B's crash-recovery entry for A's expired lock. A itself
+    // does NOT add a second, misleading failure log for a completed reminder.
+    const logs = await FailedAttempt.findAll();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ workerId: 'A', error: 'Worker stopped before finishing' });
+  });
+
+  it('cancel requests racing with 3 workers: each reminder is EITHER cancelled OR notified, never both', async () => {
+    const reminders = await createDueReminders(30);
+    const app = createApp();
+
+    const [cancelResponses] = await Promise.all([
+      Promise.all(
+        reminders.map((r) => request(app).post(`/api/reminders/${r.id}/cancel`).set('x-user-id', 'user1'))
+      ),
+      worker.runWorkerOnce('w1'),
+      worker.runWorkerOnce('w2'),
+      worker.runWorkerOnce('w3'),
+    ]);
+
+    for (const [i, reminder] of reminders.entries()) {
+      await reminder.reload();
+      const notifications = await Notification.count({ where: { reminderId: reminder.id } });
+      const response = cancelResponses[i];
+
+      if (reminder.status === 'cancelled') {
+        expect(response.status).toBe(200);
+        expect(notifications).toBe(0);
+      } else {
+        expect(reminder.status).toBe('completed');
+        expect(response.status).toBe(409); // the worker got there first
+        expect(notifications).toBe(1);
+      }
+    }
+  });
+});
+
+describe('Rescheduling', () => {
+  it('a due reminder moved to a later time is not sent now', async () => {
+    const [reminder] = await createDueReminders(1);
+    const later = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const res = await request(createApp())
+      .patch(`/api/reminders/${reminder.id}`)
+      .set('x-user-id', 'user1')
+      .send({ dueAt: later });
+    expect(res.status).toBe(200);
+
+    expect((await worker.runWorkerOnce('worker-1')).completed).toBe(0);
+    expect(await Notification.count()).toBe(0);
+  });
+});
+
+describe('Timezones (the worker only compares UTC instants)', () => {
+  it('reminders due at the same instant fire together, whatever the user timezone', async () => {
+    const justDue = new Date(Date.now() - 1000);
+    const inOneHour = new Date(Date.now() + 60 * 60 * 1000);
+    const make = (title, dueAt, timezone) =>
+      Reminder.create({ userId: 'user1', title, dueAt, nextRunAt: dueAt, timezone });
+
+    await make('India', justDue, 'Asia/Kolkata');
+    await make('Los Angeles', justDue, 'America/Los_Angeles');
+    await make('Kiribati (+14h) future', inOneHour, 'Pacific/Kiritimati');
+
+    const result = await worker.runWorkerOnce('worker-1');
+
+    expect(result.completed).toBe(2);
+    const titles = (await Notification.findAll()).map((n) => n.title).sort();
+    expect(titles).toEqual(['India', 'Los Angeles']);
   });
 });
 
@@ -229,6 +298,47 @@ describe('Retries and failures', () => {
     expect(retry.body.status).toBe('pending');
     expect(retry.body.attempts).toBe(0);
   });
+
+  it('waits longer after each failure (exponential backoff: 30s, then 60s)', async () => {
+    const [reminder] = await createDueReminders(1, { maxAttempts: 3 });
+    jest.spyOn(notificationService, 'createNotification').mockRejectedValue(new Error('Down'));
+    const expectWaitAbout = (ms) => {
+      const wait = reminder.nextRunAt.getTime() - Date.now();
+      expect(wait).toBeGreaterThan(ms - 5000);
+      expect(wait).toBeLessThanOrEqual(ms);
+    };
+
+    await worker.runWorkerOnce('worker-1');
+    await reminder.reload();
+    expectWaitAbout(30 * 1000);
+
+    await makeDueNow(reminder.id);
+    await worker.runWorkerOnce('worker-1');
+    await reminder.reload();
+    expectWaitAbout(60 * 1000);
+  });
+
+  it('logs every failed attempt with attempt number, error and worker id', async () => {
+    const [reminder] = await createDueReminders(1);
+    jest.spyOn(notificationService, 'createNotification').mockRejectedValueOnce(new Error('SMTP timeout'));
+
+    await worker.runWorkerOnce('worker-7');
+
+    const [log] = await FailedAttempt.findAll({ where: { reminderId: reminder.id } });
+    expect(log).toMatchObject({ attempt: 1, error: 'SMTP timeout', workerId: 'worker-7', willRetry: true });
+  });
+
+  it('manual retry is only allowed for failed reminders (409 otherwise)', async () => {
+    const [reminder] = await createDueReminders(1);
+    const res = await request(createApp()).post(`/api/reminders/${reminder.id}/retry`).set('x-user-id', 'user1');
+    expect(res.status).toBe(409);
+  });
+
+  it('failed attempts of another user\'s reminder are hidden (404)', async () => {
+    const [reminder] = await createDueReminders(1);
+    const res = await request(createApp()).get(`/api/reminders/${reminder.id}/attempts`).set('x-user-id', 'user2');
+    expect(res.status).toBe(404);
+  });
 });
 
 describe('Crash / server restart', () => {
@@ -263,6 +373,50 @@ describe('Crash / server restart', () => {
     const result = await worker.runWorkerOnce('other-worker');
 
     expect(result).toEqual({ released: 0, completed: 0, failed: 0 });
+  });
+
+  it('a crash is logged as a failed attempt (with the dead worker\'s id)', async () => {
+    const [reminder] = await createDueReminders(1);
+    await makeStuck(reminder.id);
+
+    await worker.releaseStuckReminders();
+
+    const [log] = await FailedAttempt.findAll({ where: { reminderId: reminder.id } });
+    expect(log).toMatchObject({
+      attempt: 1,
+      error: 'Worker stopped before finishing',
+      workerId: 'dead-worker',
+      willRetry: true,
+    });
+  });
+
+  it('a reminder that crashes the worker EVERY time stops after maxAttempts (no endless loop)', async () => {
+    const [reminder] = await createDueReminders(1, { maxAttempts: 3 });
+
+    for (let i = 0; i < 3; i++) {
+      await worker.claimNextReminder('crashy-worker'); // takes it...
+      await Reminder.update({ lockedUntil: new Date(Date.now() - 1000) }, { where: { id: reminder.id } }); // ...and dies
+      await worker.releaseStuckReminders();
+    }
+
+    await reminder.reload();
+    expect(reminder.status).toBe('failed');
+    expect(reminder.attempts).toBe(3);
+    const logs = await FailedAttempt.findAll({ where: { reminderId: reminder.id }, order: [['attempt', 'ASC']] });
+    expect(logs.map((l) => l.willRetry)).toEqual([true, true, false]);
+
+    // It is no longer picked up
+    expect((await worker.runWorkerOnce('worker-1')).completed).toBe(0);
+  });
+
+  it('two workers starting at the same time release a stuck reminder only once', async () => {
+    const [reminder] = await createDueReminders(1);
+    await makeStuck(reminder.id);
+
+    const released = await Promise.all([worker.releaseStuckReminders(), worker.releaseStuckReminders()]);
+
+    expect(released[0] + released[1]).toBe(1);
+    expect(await FailedAttempt.count()).toBe(1);
   });
 });
 
