@@ -1,0 +1,42 @@
+{
+  "name": "notification-system-fastify",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "worker": "node src/worker.js",
+    "worker:dev": "nodemon src/worker.js",
+    "test": "node --experimental-vm-modules --no-warnings=ExperimentalWarning node_modules/jest/bin/jest.js --runInBand --silent",
+    "test:coverage": "node --experimental-vm-modules --no-warnings=ExperimentalWarning node_modules/jest/bin/jest.js --runInBand --silent --coverage"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Notification & Reminder System - Node.js, Fastify, PostgreSQL, Sequelize ORM",
+  "dependencies": {
+    "@fastify/cors": "^11.4.3",
+    "dotenv": "^18.0.9",
+    "fastify": "^5.12.8",
+    "fastify-plugin": "^6.0.1",
+    "node-cron": "^4.6.0",
+    "pg": "^8.23.1",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2",
+    "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/tests/env.js"
+    ],
+    "testTimeout": 60000
+  }
+}
