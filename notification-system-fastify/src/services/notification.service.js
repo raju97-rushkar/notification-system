@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { Notification } = require('../models');
 const AppError = require('../utils/AppError');
+const { paginate } = require('../utils/paginate');
 
 // Creates the notification for a reminder, inside the worker's transaction.
 //
@@ -32,30 +33,26 @@ async function getNotifications(userId, filters) {
   if (unread === 'true') where.readAt = null; // IS NULL
   if (unread === 'false') where.readAt = { [Op.ne]: null }; // IS NOT NULL
 
-  const { rows, count } = await Notification.findAndCountAll({
+  return paginate(Notification, {
     where,
     order: [
       ['createdAt', 'DESC'],
       ['id', 'DESC'],
     ],
+    page,
     limit,
-    offset: (page - 1) * limit,
   });
-
-  return {
-    data: rows,
-    pagination: { page, limit, total: count, totalPages: Math.ceil(count / limit) },
-  };
 }
 
 async function markAsRead(userId, id) {
+  // ONE conditional UPDATE: readAt is only set while it is still empty
+  // (UPDATE ... WHERE id = ? AND user_id = ? AND read_at IS NULL).
+  // Read-then-update would let two clicks at the same moment both see
+  // "unread" and the second would overwrite the first read time.
+  await Notification.update({ readAt: new Date() }, { where: { id, userId, readAt: null } });
+
   const notification = await Notification.findOne({ where: { id, userId } });
   if (!notification) throw new AppError(404, 'Notification not found');
-
-  // Only set readAt the first time
-  if (!notification.readAt) {
-    await notification.update({ readAt: new Date() });
-  }
   return notification;
 }
 

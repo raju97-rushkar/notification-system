@@ -154,6 +154,12 @@ describe('List reminders (pagination, filter, sort)', () => {
     expect(res.body.pagination.total).toBe(3); // Task 03, 04, 05
   });
 
+  it('rejects a date range where "from" is after "to"', async () => {
+    const res = await get('/api/reminders?from=2099-02-01T00:00:00Z&to=2099-01-01T00:00:00Z');
+    expect(res.status).toBe(400);
+    expect(res.body.details).toEqual([{ field: 'from', message: '"from" must be before "to"' }]);
+  });
+
   it('searches by title (special characters are safe)', async () => {
     expect((await get('/api/reminders?search=task 1')).body.pagination.total).toBe(10); // 10-19
     expect((await get('/api/reminders?search=%25')).body.pagination.total).toBe(0); // "%" is not a wildcard
@@ -256,6 +262,26 @@ describe('Other routes', () => {
 
   it('missing x-user-id gives 401 even when the body is also invalid (auth runs first)', async () => {
     expect((await post('/api/reminders', {}, null)).status).toBe(401);
+  });
+
+  it('a too long x-user-id gives 400, not a database error (500)', async () => {
+    const res = await post('/api/reminders', { title: 'x', dueAt: minutesFromNow(5) }, 'u'.repeat(256));
+    expect(res.status).toBe(400);
+    expect((await post('/api/reminders', { title: 'x', dueAt: minutesFromNow(5) }, 'u'.repeat(255))).status).toBe(201);
+  });
+
+  it('an x-user-id of only spaces counts as missing (401), and spaces around it are trimmed', async () => {
+    expect((await get('/api/reminders', '   ')).status).toBe(401);
+
+    const created = await post('/api/reminders', { title: 'x', dueAt: minutesFromNow(5) }, '  user9  ');
+    expect(created.body.userId).toBe('user9');
+  });
+
+  it('health check gives 503 when the database is down', async () => {
+    jest.spyOn(app.sequelize, 'authenticate').mockRejectedValueOnce(new Error('connection refused'));
+    const res = await get('/api/health', null);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ server: 'ok', database: 'disconnected' });
   });
 
   it('health check works without x-user-id', async () => {

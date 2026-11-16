@@ -65,3 +65,19 @@ describe('Notifications API', () => {
     expect(read.body.data[0].id).toBe(id);
   });
 });
+
+describe('Concurrency', () => {
+  it('10 "mark as read" clicks at the same moment all keep the FIRST read time', async () => {
+    await createNotifications('user1', 1);
+    const { id } = await Notification.findOne();
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, () => api.patch(`/api/notifications/${id}/read`, undefined, 'user1'))
+    );
+
+    const readTimes = new Set(responses.map((r) => r.body.readAt));
+    const stored = await Notification.findByPk(id);
+    expect(readTimes.size).toBe(1);
+    expect([...readTimes][0]).toBe(stored.readAt.toISOString());
+  });
+});

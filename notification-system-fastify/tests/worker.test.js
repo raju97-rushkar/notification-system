@@ -161,6 +161,58 @@ describe('Duplicate prevention (multiple workers)', () => {
   });
 });
 
+describe('Batch claiming', () => {
+  it('claims several due reminders in one go, oldest first, each attempt counted once', async () => {
+    const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
+    await insertReminder({ title: 'newest', dueAt: minutesAgo(1) });
+    await insertReminder({ title: 'oldest', dueAt: minutesAgo(30) });
+    await insertReminder({ title: 'middle', dueAt: minutesAgo(10) });
+    await insertReminder({ title: 'future', dueAt: new Date(Date.now() + 60 * 60 * 1000) });
+
+    const claimed = await worker.claimDueReminders('worker-1', 2);
+
+    expect(claimed.map((r) => r.title)).toEqual(['oldest', 'middle']);
+    claimed.forEach((r) => expect(r).toMatchObject({ status: 'processing', lockedBy: 'worker-1', attempts: 1 }));
+    expect(await Reminder.count({ where: { status: 'pending' } })).toBe(2); // newest + future untouched
+  });
+
+  it('two workers claiming at the same moment never get the same reminder', async () => {
+    await createDueReminders(20);
+
+    const [a, b] = await Promise.all([worker.claimDueReminders('A', 15), worker.claimDueReminders('B', 15)]);
+
+    const ids = [...a, ...b].map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length); // no overlap
+    expect(ids).toHaveLength(20);
+  });
+});
+
+describe('Cleanup of old failure logs', () => {
+  it('deletes logs older than 30 days, at most once per hour', async () => {
+    const [reminder] = await createDueReminders(1, { status: 'failed' });
+    const log = (attempt, daysAgo) =>
+      FailedAttempt.create({ reminderId: reminder.id, attempt, error: 'x', willRetry: false }).then((row) =>
+        sequelize.query('UPDATE failed_attempts SET created_at = :at WHERE id = :id', {
+          replacements: { at: new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000), id: row.id },
+        })
+      );
+    await log(1, 31); // old
+    await log(2, 1); // recent
+
+    // Pretend 2 hours have passed, so the hourly cleanup is due no matter
+    // what earlier tests did
+    const realNow = Date.now;
+    jest.spyOn(Date, 'now').mockImplementation(() => realNow() + 2 * 60 * 60 * 1000);
+    await worker.runWorkerOnce('worker-1');
+    expect((await FailedAttempt.findAll()).map((f) => f.attempt)).toEqual([2]);
+
+    // Another old log right away: not deleted, the next cleanup is in an hour
+    await log(3, 31);
+    await worker.runWorkerOnce('worker-1');
+    expect(await FailedAttempt.count()).toBe(2);
+  });
+});
+
 describe('Rescheduling', () => {
   it('a due reminder moved to a later time is not sent now', async () => {
     const [reminder] = await createDueReminders(1);

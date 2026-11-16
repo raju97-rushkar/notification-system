@@ -50,24 +50,37 @@ The API and the worker never talk to each other directly. **PostgreSQL is the on
 
 File: [src/jobs/reminder.job.js](../src/jobs/reminder.job.js)
 
-### Transaction 1: claim a reminder
+### Transaction 1: claim a small batch of reminders
 
 ```js
 sequelize.transaction(async (transaction) => {
-  const reminder = await Reminder.findOne({
+  const due = await Reminder.findAll({
     where: { status: 'pending', nextRunAt: { [Op.lte]: new Date() } },
     order: [['nextRunAt', 'ASC']],
+    limit: CLAIM_SIZE,               // 10 by default
     lock: transaction.LOCK.UPDATE,   // SELECT ... FOR UPDATE
     skipLocked: true,                //            SKIP LOCKED
     transaction,
   });
-  await reminder.update({ status: 'processing', lockedBy, lockedUntil, attempts: +1 }, { transaction });
+  await Reminder.update(
+    { status: 'processing', lockedBy, lockedUntil, attempts: sequelize.literal('attempts + 1') },
+    { where: { id: due.map((r) => r.id) }, returning: true, transaction });   // ONE UPDATE for all
 });
 ```
 
-- `FOR UPDATE` locks the row until the transaction ends.
-- `SKIP LOCKED` makes other workers skip that row and take the next one. They don't wait, and they never get the same row.
-- After COMMIT the status is `processing`, so no other worker's query matches it anymore.
+- `FOR UPDATE` locks the rows until the transaction ends.
+- `SKIP LOCKED` makes other workers skip those rows and take the next ones. They don't wait, and they never get the same row.
+- After COMMIT the status is `processing`, so no other worker's query matches them anymore.
+- **Why a batch:** one claim transaction per 10 reminders, instead of one per reminder, saves database round trips. Each reminder is still *processed* in its own transaction (below), so one failure never affects the others. `CLAIM_SIZE` stays small so several workers still share the work, and `LOCK_TIME_MS` (60s) is far more than a batch needs.
+
+**Measured** (1000 due reminders, local PostgreSQL, median of 3 runs):
+
+| | One claim per reminder | Batch claim (10) + hourly cleanup |
+|---|---|---|
+| 1 worker | 2659 ms | **1548 ms** |
+| 4 workers | 1296 ms | **702 ms** |
+
+Every run still ended with exactly 1000 notifications.
 
 ### Transaction 2: create the notification + mark completed
 
@@ -87,7 +100,7 @@ sequelize.transaction(async (transaction) => {
 
 ### Transaction 3: on failure
 
-The reminder's status change (back to `pending` with a later `nextRunAt`, or `failed`) and the new `failed_attempts` row are saved in one transaction. The log and the status always match.
+The reminder's status change (back to `pending` with a later `nextRunAt`, or `failed`) and the new `failed_attempts` row are saved in one transaction. The log and the status always match. The same helper, `recordFailedAttempt()`, is used for normal failures and for crash recovery.
 
 If our lock was already taken over by another worker, the update matches no row. In that case **no** failure log is written, because this attempt no longer owns the reminder.
 

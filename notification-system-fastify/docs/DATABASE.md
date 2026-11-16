@@ -70,7 +70,7 @@ That last point matters because the insert runs inside a transaction. In Postgre
 
 `id, reminderId (FK), attempt, error, workerId, willRetry, createdAt`. It has `updatedAt: false` because a log row never changes.
 
-PostgreSQL has no TTL index (MongoDB has one), so the worker deletes rows older than 30 days on each run.
+PostgreSQL has no TTL index (MongoDB has one), so the worker deletes rows older than 30 days itself (at most once per hour).
 
 ## 6. Indexes
 

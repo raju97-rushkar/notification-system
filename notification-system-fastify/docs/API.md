@@ -17,8 +17,8 @@ Base URL: `http://localhost:3003/api`
 
 | Status | When |
 |---|---|
-| 400 | invalid input, invalid id (not a UUID), broken or empty JSON body, date in the past, empty update |
-| 401 | `x-user-id` header missing (checked before the body, so it wins over 400) |
+| 400 | invalid input, invalid id (not a UUID), broken or empty JSON body, date in the past, empty update, `from` after `to`, `x-user-id` longer than 255 characters |
+| 401 | `x-user-id` header missing or only spaces (checked before the body, so it wins over 400). Spaces around the id are trimmed |
 | 404 | not found (or belongs to another user), unknown URL |
 | 409 | action not allowed in the current status (e.g. editing a completed reminder) |
 | 415 | body sent with an unsupported `Content-Type` (only `application/json` is accepted) |

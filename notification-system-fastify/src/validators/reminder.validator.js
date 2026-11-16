@@ -17,29 +17,36 @@ const createReminderSchema = z.object({
   timezone: timezone.optional(),
 });
 
-const updateReminderSchema = z.object({
-  title: z.string().trim().min(1).max(200).optional(),
-  message: z.string().max(2000).optional(),
-  dueAt: dateWithTimezone.optional(),
-  timezone: timezone.optional(),
-});
+// Same fields and rules as create, but every field is optional
+const updateReminderSchema = createReminderSchema.partial();
 
-// Query string for GET /reminders. Query values always arrive as text,
+// ?page=&limit= for every list endpoint. Query values always arrive as text,
 // so z.coerce.number() turns "2" into 2.
-const listRemindersSchema = z.object({
+const pagination = {
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10),
-  status: z.enum(Object.values(STATUS)).optional(),
-  from: dateWithTimezone.optional(),
-  to: dateWithTimezone.optional(),
-  search: z.string().trim().optional(),
-  sortBy: z.enum(['dueAt', 'createdAt', 'title']).default('createdAt'),
-  order: z.enum(['asc', 'desc']).default('desc'),
-});
+};
+
+// Query string for GET /reminders
+const listRemindersSchema = z
+  .object({
+    ...pagination,
+    status: z.enum(Object.values(STATUS)).optional(),
+    from: dateWithTimezone.optional(),
+    to: dateWithTimezone.optional(),
+    search: z.string().trim().max(200).optional(),
+    sortBy: z.enum(['dueAt', 'createdAt', 'title']).default('createdAt'),
+    order: z.enum(['asc', 'desc']).default('desc'),
+  })
+  // A range that ends before it starts is a client mistake: say so,
+  // instead of quietly returning an empty list.
+  .refine((query) => !query.from || !query.to || query.from <= query.to, {
+    message: '"from" must be before "to"',
+    path: ['from'],
+  });
 
 const listNotificationsSchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(10),
+  ...pagination,
   unread: z.enum(['true', 'false']).optional(),
 });
 

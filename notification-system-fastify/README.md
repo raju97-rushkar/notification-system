@@ -53,6 +53,7 @@ You don't need to create anything by hand. On startup the app:
 | `RUN_WORKER` | true | Start the worker inside the API process |
 | `WORKER_SCHEDULE` | `*/5 * * * * *` | How often the worker runs (node-cron, with seconds) |
 | `WORKER_BATCH_SIZE` | 50 | Max reminders per run |
+| `WORKER_CLAIM_SIZE` | 10 | Reminders claimed together in one transaction (see ARCHITECTURE) |
 | `WORKER_LOCK_TIME_MS` | 60000 | After a crash, a stuck reminder is released after this time |
 | `MAX_ATTEMPTS` | 3 | Attempts before a reminder becomes `failed` |
 | `RETRY_DELAY_MS` | 30000 | Wait before the first retry (doubles each time) |
@@ -78,7 +79,7 @@ src/
   models/               Sequelize models + relationships         (same)
   jobs/reminder.job.js  background worker (node-cron + transactions) (same, logs via pino)
   config/database.js    Sequelize instance, connectDB()          (same)
-  utils/                small helpers
+  utils/                AppError, paginate() (shared by every list endpoint), timezone check
 tests/                  unit tests, API tests (app.inject), worker tests, multi-process test
 ```
 
@@ -107,7 +108,7 @@ Unchanged: models, associations, indexes, services, the worker logic (SKIP LOCKE
 
 ## 6. Tests
 
-`npm test` runs **107 tests** (about 11 seconds) on a real PostgreSQL.
+`npm test` runs **115 tests** (about 15 seconds) on a real PostgreSQL.
 
 | File | Type | What it checks |
 |---|---|---|
