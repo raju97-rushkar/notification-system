@@ -78,8 +78,8 @@ Defined in each model's `indexes` option. The `fields` are database column names
 
 | Table | Index | Columns | Used by |
 |---|---|---|---|
-| reminders | `idx_reminders_status_next_run` | `status, next_run_at` | worker: find due reminders |
-| reminders | `idx_reminders_status_locked_until` | `status, locked_until` | worker: find stuck reminders |
+| reminders | `idx_reminders_pending_next_run` | `next_run_at` **WHERE status = 'pending'** | worker: find due reminders |
+| reminders | `idx_reminders_processing_locked` | `locked_until` **WHERE status = 'processing'** | worker: find stuck reminders |
 | reminders | `idx_reminders_user_status_due` | `user_id, status, due_at` | API: filter by status, sort by date |
 | reminders | `idx_reminders_user_created` | `user_id, created_at DESC` | API: newest first |
 | notifications | `notifications_reminder_id_key` | `reminder_id` (unique) | duplicate prevention |
@@ -93,14 +93,37 @@ Defined in each model's `indexes` option. The `fields` are database column names
 
 | Query | Plan | Time |
 |---|---|---|
-| Worker: claim a due reminder (`FOR UPDATE SKIP LOCKED`) | Index Scan `idx_reminders_status_next_run` | 0.05 ms |
-| Worker: find stuck reminders | Index Scan `idx_reminders_status_locked_until` | 0.03 ms |
+| Worker: claim a due reminder (`FOR UPDATE SKIP LOCKED`) | Index Scan `idx_reminders_pending_next_run` | 0.04 ms |
+| Worker: find stuck reminders | Index Scan `idx_reminders_processing_locked` | 0.03 ms |
 | API: my reminders, newest first | Index Scan `idx_reminders_user_created` | 0.06 ms |
 | API: my reminders by status, sorted by due date | Bitmap Index Scan `idx_reminders_user_status_due` | 0.03 ms |
 | API: count for pagination | Bitmap Index Scan `idx_reminders_user_created` | 0.15 ms |
 | API: my (unread) notifications | Index Scan `idx_notifications_user_created` | 0.04–0.08 ms |
 
-Every query uses an index, and none needs a full table scan. Old completed reminders don't slow the worker down, because `status` is the first column of its indexes. That's why the indexes were left as they are.
+Every query uses an index, and none needs a full table scan. The two worker rows were measured again after the change below.
+
+### Partial indexes for the worker
+
+The worker only looks for `pending` and `processing` reminders, but after a few weeks almost every row is `completed`. The first version used composite indexes on `(status, next_run_at)` and `(status, locked_until)`. They were fast, but they stored **every** row, including finished ones.
+
+They are now **partial indexes** (`CREATE INDEX ... WHERE status = 'pending'`). In Sequelize this is the index option `where: { status: STATUS.PENDING }`. Only the rows the worker can still pick up are in them.
+
+Measured on 200,000 reminders (200 pending, 10 processing, the rest completed):
+
+| Index | Size | Query time |
+|---|---|---|
+| `(status, next_run_at)` (before) | 11 MB | 0.040 ms |
+| `(next_run_at) WHERE status = 'pending'` (now) | **16 kB** | 0.043 ms |
+| `(status, locked_until)` (before) | 1288 kB | 0.024 ms |
+| `(locked_until) WHERE status = 'processing'` (now) | **16 kB** | 0.034 ms |
+
+The queries are no faster today. The gain is that these indexes no longer grow as completed reminders pile up, so they always fit in memory.
+
+**Existing databases:** `sync()` creates the new indexes but never drops the old ones. Drop them once by hand:
+
+```sql
+DROP INDEX IF EXISTS idx_reminders_status_next_run, idx_reminders_status_locked_until;
+```
 
 ## 7. Query decisions
 

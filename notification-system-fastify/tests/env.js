@@ -8,3 +8,7 @@ process.env.SIMULATED_FAILURE_RATE = '0';
 // It is created automatically. Change it here if your password/port is different.
 process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL || 'postgres://postgres:postgres@127.0.0.1:5433/notification_system_fastify_test';
+
+// Rate limit off for normal tests (one test file sends far more than 100
+// requests per minute). tests/security.test.js turns it on with a small limit.
+process.env.RATE_LIMIT_MAX = '0';

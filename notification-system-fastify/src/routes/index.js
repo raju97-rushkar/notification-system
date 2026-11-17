@@ -4,7 +4,8 @@ const notificationRoutes = require('./notification.routes');
 // Registered with prefix "/api" in app.js.
 async function routes(app) {
   // Health check: is the server running and connected to the database?
-  app.get('/health', async (request, reply) => {
+  // Not rate limited: monitoring tools may call it often.
+  app.get('/health', { config: { rateLimit: false } }, async (request, reply) => {
     try {
       await app.sequelize.authenticate();
       return { server: 'ok', database: 'connected' };

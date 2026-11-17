@@ -16,6 +16,8 @@
   "description": "Notification & Reminder System - Node.js, Fastify, PostgreSQL, Sequelize ORM",
   "dependencies": {
     "@fastify/cors": "^11.4.3",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/rate-limit": "^11.2.1",
     "dotenv": "^18.0.9",
     "fastify": "^5.12.8",
     "fastify-plugin": "^6.0.1",

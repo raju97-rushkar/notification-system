@@ -22,13 +22,16 @@ The API and the worker never talk to each other directly. **PostgreSQL is the on
 | `errorHandler` | turns every error into a JSON response (400 / 401 / 404 / 409 / 415 / 500) | `setErrorHandler`, `setNotFoundHandler` |
 | `database` | `connectDB()` (create DB + `sync()`), then `app.sequelize` / `app.models`. Closes the pool on close | `decorate`, `onClose` hook |
 | `worker` | starts the node-cron job once everything is loaded, stops it before the DB closes | `onReady`, `preClose` hooks |
-| `cors`, `auth`, `routes` | only when `api: true`. `auth` adds `request.userId` and the `checkUser` hook | `decorateRequest`, `onRequest` hook |
+| `security` | only when `api: true`. helmet headers, CORS (`CORS_ORIGIN`), rate limit per IP (`RATE_LIMIT_MAX`, 429) | `@fastify/helmet`, `@fastify/cors`, `@fastify/rate-limit` |
+| `auth`, `routes` | only when `api: true`. `auth` adds `request.userId` and the `checkUser` hook | `decorateRequest`, `onRequest` hook |
 
-`validation`, `errorHandler`, `database`, `auth` and `worker` are wrapped in `fastify-plugin`, so what they set up applies to the whole app. The routes are normal (encapsulated) plugins. That is how the `checkUser` hook covers `/reminders` and `/notifications` but not `/health`.
+Fastify options in `buildApp()`: `bodyLimit` 16 KB (413 above it), `requestTimeout` 30 s, `trustProxy` from `TRUST_PROXY`.
+
+`validation`, `errorHandler`, `database`, `security`, `auth` and `worker` are wrapped in `fastify-plugin`, so what they set up applies to the whole app. The routes are normal (encapsulated) plugins. That is how the `checkUser` hook covers `/reminders` and `/notifications` but not `/health`.
 
 **One request, step by step** (`PATCH /api/reminders/:id`):
-1. `onRequest`: `checkUser` reads `x-user-id`, or answers 401
-2. Fastify parses the JSON body (broken → 400, wrong `Content-Type` → 415)
+1. `onRequest`: rate limit (429), then `checkUser` reads `x-user-id`, or answers 401
+2. Fastify parses the JSON body (broken → 400, over 16 KB → 413, wrong `Content-Type` → 415)
 3. validation: `params` (UUID) and `body` (zod). `dueAt` becomes a `Date`. Invalid → 400
 4. handler → controller → service → Sequelize
 5. the returned object is sent as JSON. Any thrown error goes to the error handler
@@ -144,4 +147,7 @@ So a crash counts as an attempt. A reminder that crashes the worker every time e
 - Up to ~5 seconds of delay because of the cron interval. It's configurable.
 - Validation uses zod, not JSON Schema. So there is no automatic Swagger/OpenAPI page and no fast-json-stringify response serialization. Responses use `JSON.stringify`. A next step would be `@fastify/swagger` with zod-to-JSON-Schema.
 - `sync()` doesn't alter existing tables. Use migrations in production.
+- `x-user-id` is not real authentication. Anyone can send any id. A real app would verify a JWT (`@fastify/jwt`) in the same `onRequest` hook.
+- The rate limit is kept in memory per process. With several API servers, each counts on its own. `@fastify/rate-limit` can use Redis to share the count.
+- `npm audit` reports a moderate issue in `uuid` (pulled in by Sequelize 6). It only affects calls that pass a buffer argument, which this project doesn't make. The suggested "fix" would downgrade Sequelize to 3.x, so it was not applied.
 - Worker times use the Node.js clock (`new Date()`). With several servers, keep their clocks in sync (NTP). The raw-SQL version uses PostgreSQL's `now()` instead.

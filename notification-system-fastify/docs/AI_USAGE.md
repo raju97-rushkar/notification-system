@@ -67,10 +67,25 @@
   - Result: 1 worker 2659 → 1548 ms, 4 workers 1296 → 702 ms. Every run still had exactly 1000 notifications.
 - **New tests:** batch claim order and attempts, two workers claiming at once never overlap, and the hourly cleanup.
 
+## 9. Security hardening and partial indexes
+
+- **Prompt:** the day plan asked for better API security, request validation, centralized error handling, and a review of indexes.
+- **Security plugin (`plugins/security.js`):**
+  - `@fastify/helmet` for safe response headers.
+  - CORS origins from `CORS_ORIGIN`. Not set means any origin.
+  - `@fastify/rate-limit`: 100 requests per minute per IP, then 429 with `Retry-After`. `/health` is excluded.
+  - The rate limit is keyed by IP and not by `x-user-id`, on purpose. The header is not a real login, so a client could change it on every request.
+  - Fastify options: 16 KB `bodyLimit` (413), 30 s `requestTimeout`, and `trustProxy` for running behind a proxy.
+  - The existing error handler already turns the 413 and 429 errors into the normal `{ message }` format, because they have a 4xx `statusCode`. No change was needed there.
+- **Small bug caught while writing it:** an empty `RATE_LIMIT_MAX=` would have become `Number('') = 0`, which would silently turn the limit off. Now only an explicit `0` turns it off.
+- **Partial indexes:** an `EXPLAIN ANALYZE` on 200,000 reminders showed that the worker's indexes held every row, including finished ones (11 MB). They are now partial indexes (`WHERE status = 'pending'` and `WHERE status = 'processing'`), at 16 kB and the same query speed. Details are in DATABASE.md.
+- **Verification:** 13 new tests (`security.test.js`, `database.test.js`), so 128 pass in total. A real server on a spare port with `RATE_LIMIT_MAX=5` returned `200` five times and then `429`, with `nosniff` set and no `X-Powered-By`.
+- **Decided not to do:** `npm audit` flags `uuid` inside Sequelize 6. The suggested fix downgrades Sequelize to 3.x, and the affected function (with a buffer argument) is never called. Recorded as a known limitation.
+
 ---
 
 ## How I verified everything
 
-1. `npm test`: 115 tests on a real PostgreSQL (separate `notification_system_fastify_test` database).
+1. `npm test`: 128 tests on a real PostgreSQL (separate `notification_system_fastify_test` database).
 2. A manual run on port 3003: health check, create, list with sort, invalid id (400), missing header (401), then the worker completed the reminder and the notification appeared. The log showed pino JSON lines for each request and the worker run.
 3. *(TODO, do this yourself:)* Test the APIs in Postman, and run `npm run worker` next to `npm start` with `RUN_WORKER=false`.

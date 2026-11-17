@@ -58,6 +58,10 @@ You don't need to create anything by hand. On startup the app:
 | `MAX_ATTEMPTS` | 3 | Attempts before a reminder becomes `failed` |
 | `RETRY_DELAY_MS` | 30000 | Wait before the first retry (doubles each time) |
 | `SIMULATED_FAILURE_RATE` | 0 | Demo only: share of attempts that fail on purpose |
+| `RATE_LIMIT_MAX` | 100 | Requests per minute per IP address, then 429. `0` = off |
+| `CORS_ORIGIN` | (any) | Websites allowed to call the API from a browser, comma separated, e.g. `https://app.example.com` |
+| `BODY_LIMIT` | 16384 | Largest request body in bytes, bigger = 413 |
+| `TRUST_PROXY` | false | `true` behind nginx / a load balancer, so the rate limit sees the client's real IP |
 
 ## 4. Folder structure
 
@@ -70,6 +74,7 @@ src/
     validation.js         zod as Fastify's validator compiler
     errorHandler.js       setErrorHandler + setNotFoundHandler
     database.js           connect Sequelize on start, close the pool on app.close()
+    security.js           helmet headers, CORS, rate limit
     auth.js               checkUser hook (x-user-id) + request.userId
     worker.js             start node-cron on onReady, stop it on preClose
   routes/               URL + schema  ->  controller (each file is a plugin)
@@ -108,7 +113,7 @@ Unchanged: models, associations, indexes, services, the worker logic (SKIP LOCKE
 
 ## 6. Tests
 
-`npm test` runs **115 tests** (about 15 seconds) on a real PostgreSQL.
+`npm test` runs **128 tests** (about 15 seconds) on a real PostgreSQL.
 
 | File | Type | What it checks |
 |---|---|---|
@@ -118,6 +123,8 @@ Unchanged: models, associations, indexes, services, the worker logic (SKIP LOCKE
 | [tests/worker.test.js](tests/worker.test.js) | integration | duplicates (5 workers, cancel races), transactions, SKIP LOCKED, retries + backoff, crash recovery, overdue, rescheduling, timezones, node-cron |
 | [tests/workerPlugin.test.js](tests/workerPlugin.test.js) | integration | the worker plugin starts with `app.ready()` and stops with `app.close()` |
 | [tests/multiprocess.test.js](tests/multiprocess.test.js) | integration | 4 separate worker processes, 200 reminders → exactly 200 notifications |
+| [tests/security.test.js](tests/security.test.js) | integration | helmet headers, CORS preflight, rate limit (429, per IP, `/health` excluded), 16 KB body limit (413) |
+| [tests/database.test.js](tests/database.test.js) | integration | the worker's partial indexes exist and the claim query can use them |
 
 **Why `npm test` runs Node with `--experimental-vm-modules`:** `app.inject()` uses `light-my-request`, which loads `cookie` 2.x. That package is ESM only. Plain Node can `require()` it, but Jest's module loader can't unless VM modules are enabled. The test script turns them on and hides the "experimental" warning. Use Node 22.12 or newer for tests.
 

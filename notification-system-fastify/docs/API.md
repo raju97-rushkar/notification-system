@@ -21,8 +21,12 @@ Base URL: `http://localhost:3003/api`
 | 401 | `x-user-id` header missing or only spaces (checked before the body, so it wins over 400). Spaces around the id are trimmed |
 | 404 | not found (or belongs to another user), unknown URL |
 | 409 | action not allowed in the current status (e.g. editing a completed reminder) |
+| 413 | body larger than 16 KB (`{ "message": "Request body is too large" }`) |
 | 415 | body sent with an unsupported `Content-Type` (only `application/json` is accepted) |
+| 429 | more than `RATE_LIMIT_MAX` (100) requests per minute from one IP address. See the `Retry-After` header |
 | 500 | unexpected server error |
+
+**Rate limit headers** on every response (except `/health`): `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`. The limit counts per IP address, not per `x-user-id`, because the header is not a real login and could be changed on every request.
 
 An invalid id is caught by the route's `params` schema, so it uses the validation format:
 ```json
